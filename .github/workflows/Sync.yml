@@ -108,7 +108,7 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           # 后台运行真实推送
-          stdbuf -oL -eL git -c http.postBuffer=2097152000 push gitee HEAD:master --force --verbose > /tmp/push.log 2>&1 &
+          git -c http.postBuffer=2097152000 push gitee HEAD:master --force --verbose > /tmp/push.log 2>&1 &
           PUSH_PID=$!
           START_TIME=$(date +%s)
           
@@ -117,37 +117,54 @@ jobs:
             ELAPSED=$(( $(date +%s) - START_TIME ))
             ELAPSED=$((ELAPSED + 1))  # 避免除零
             
-            # 基于时间的估算进度 (假设平均速度 30-50 MB/s)
-            EST_SPEED=$(( 30 + RANDOM % 20 ))  # 30-49 MB/s 随机值
+            # 使用保守的速度估算（20-35 MB/s）
+            EST_SPEED=$(( 20 + RANDOM % 15 ))
             EST_UPLOADED=$((ELAPSED * EST_SPEED))
             
+            # 限制最大估算值，让进度能平滑增长到99%
             if [ $EST_UPLOADED -gt $TOTAL_MB ]; then
-              EST_PERCENT=95  # 接近完成但不到100%
-            elif [ $TOTAL_MB -gt 0 ]; then
-              EST_PERCENT=$((EST_UPLOADED * 100 / TOTAL_MB))
+              # 如果估算超过实际大小，根据时间缓慢增加进度到99%
+              OVER_TIME=$((ELAPSED - (TOTAL_MB / EST_SPEED)))
+              
+              # 30秒后开始缓慢增加进度
+              if [ $OVER_TIME -gt 30 ]; then
+                EST_PERCENT=$((95 + (OVER_TIME - 30) / 3))  # 每3秒增加1%
+                if [ $EST_PERCENT -gt 99 ]; then
+                  EST_PERCENT=99
+                fi
+              else
+                EST_PERCENT=95  # 前30秒保持在95%
+              fi
+              
+              EST_UPLOADED=$TOTAL_MB  # 显示完整大小
+              STATUS_TEXT="正在完成..."
             else
-              EST_PERCENT=0
+              EST_PERCENT=$((EST_UPLOADED * 100 / TOTAL_MB))
+              STATUS_TEXT="上传中..."
             fi
             
-            # 限制百分比最大为95
-            if [ $EST_PERCENT -gt 95 ]; then
-              EST_PERCENT=95
-            fi
-            
-            # 生成进度条（使用ASCII字符 = 和 -）
+            # 使用纯ASCII字符显示进度条（避免任何Unicode）
             BAR_LEN=30
             FILLED_LEN=$((EST_PERCENT * BAR_LEN / 100))
             EMPTY_LEN=$((BAR_LEN - FILLED_LEN))
             
-            # 使用纯ASCII字符显示进度条
-            printf "\r  ⏳ 推送中 ["
-            printf "%0.s=" $(seq 1 $FILLED_LEN)
-            printf "%0.s-" $(seq 1 $EMPTY_LEN)
-            printf "] %3d%% | %d/%d MB | 已用 %ds" \
-              "$EST_PERCENT" \
-              "$((EST_UPLOADED < TOTAL_MB ? EST_UPLOADED : TOTAL_MB))" \
-              "$TOTAL_MB" \
-              "$ELAPSED"
+            # 使用简单循环生成ASCII字符（不使用seq）
+            BAR="["
+            i=0
+            while [ $i -lt $FILLED_LEN ]; do
+              BAR="${BAR}="
+              i=$((i + 1))
+            done
+            
+            i=0
+            while [ $i -lt $EMPTY_LEN ]; do
+              BAR="${BAR}-"
+              i=$((i + 1))
+            done
+            BAR="${BAR}]"
+            
+            # 打印进度（使用echo而不是printf避免编码问题）
+            echo -ne "\r  ⏳ 推送中 ${BAR} ${EST_PERCENT}% | ${EST_UPLOADED}/${TOTAL_MB} MB | 已用 ${ELAPSED}s | ${STATUS_TEXT}   "
             
             sleep 5
           done
