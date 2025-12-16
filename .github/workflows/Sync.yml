@@ -1,0 +1,159 @@
+name: Sync BetterGI Release to Gitee
+
+on:
+  schedule:
+    # 每60分钟检查一次
+    # - cron: '*/60 * * * *'
+  workflow_dispatch: # 支持手动触发
+
+env:
+  # GitHub API 地址
+  GH_API_URL: "https://api.github.com/repos/kaedelcb/better-genshin-impact/actions/workflows/publish.yml/runs?status=success&per_page=1"
+  # 基础下载地址
+  DOWNLOAD_BASE_URL: "https://nightly.link/kaedelcb/better-genshin-impact/actions/runs"
+  # Gitee 仓库地址（需修改为你的Gitee仓库）
+  GITEE_REPO: "bcmdy_ms/BetterGI-lcb"
+
+jobs:
+  check-and-sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出当前仓库
+        uses: actions/checkout@v4
+        with:
+          # 获取完整历史以便推送
+          fetch-depth: 0
+
+      - name: 获取最新 Workflow 信息
+        id: fetch_workflow
+        run: |
+          # 调用 GitHub API 获取最新成功运行
+          RESPONSE=$(curl -s "${{ env.GH_API_URL }}")
+          echo "API Response: $RESPONSE"
+          
+          # 解析 workflow_run id 和 name
+          WORKFLOW_ID=$(echo "$RESPONSE" | jq -r '.workflow_runs[0].id')
+          WORKFLOW_NAME=$(echo "$RESPONSE" | jq -r '.workflow_runs[0].name')
+          
+          echo "Latest workflow ID: $WORKFLOW_ID"
+          echo "Latest workflow name: $WORKFLOW_NAME"
+          
+          # 输出到环境变量
+          echo "WORKFLOW_ID=$WORKFLOW_ID" >> $GITHUB_ENV
+          echo "WORKFLOW_NAME=$WORKFLOW_NAME" >> $GITHUB_ENV
+
+      - name: 读取保存的 ID 并进行比较
+        id: check_update
+        run: |
+          # 定义保存ID的文件路径
+          ID_FILE=".last-workflow-id"
+          
+          # 如果文件存在，读取其中的ID
+          if [ -f "$ID_FILE" ]; then
+            SAVED_ID=$(cat "$ID_FILE")
+            echo "Saved ID: $SAVED_ID"
+          else
+            SAVED_ID="none"
+            echo "No saved ID found"
+          fi
+          
+          # 比较ID
+          if [ "$SAVED_ID" = "${{ env.WORKFLOW_ID }}" ]; then
+            echo "ID未变化，无需更新"
+            echo "NEED_UPDATE=false" >> $GITHUB_ENV
+          else
+            echo "检测到新Workflow，需要更新"
+            echo "NEED_UPDATE=true" >> $GITHUB_ENV
+            echo "旧ID: $SAVED_ID"
+            echo "新ID: ${{ env.WORKFLOW_ID }}"
+          fi
+
+      - name: 更新保存的 ID 并下载文件
+        if: env.NEED_UPDATE == 'true'
+        run: |
+          # 更新保存的ID
+          echo "${{ env.WORKFLOW_ID }}" > .last-workflow-id
+          echo "已更新保存的ID"
+          
+          # 构建下载URL
+          DOWNLOAD_URL="${{ env.DOWNLOAD_BASE_URL }}/${{ env.WORKFLOW_ID }}/BetterGI_7z.zip"
+          echo "下载URL: $DOWNLOAD_URL"
+          
+          # 下载文件
+          echo "开始下载..."
+          curl -L -o BetterGI_7z.zip "$DOWNLOAD_URL"
+          
+          # 验证文件是否下载成功
+          if [ -f "BetterGI_7z.zip" ]; then
+            FILE_SIZE=$(ls -lh BetterGI_7z.zip | awk '{print $5}')
+            echo "文件下载成功，大小: $FILE_SIZE"
+          else
+            echo "文件下载失败"
+            exit 1
+          fi
+
+      - name: 配置 Git 和 Gitee 认证
+        if: env.NEED_UPDATE == 'true'
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # 添加 Gitee 远程仓库（使用配置的Token）
+          git remote add gitee https://${{ secrets.GITEE_TOKEN }}@gitee.com/${{ env.GITEE_REPO }}.git || \
+          git remote set-url gitee https://${{ secrets.GITEE_TOKEN }}@gitee.com/${{ env.GITEE_REPO }}.git
+
+      - name: 推送到 Gitee
+        if: env.NEED_UPDATE == 'true'
+        run: |
+          # 添加文件到暂存区
+          git add .last-workflow-id BetterGI_7z.zip
+          
+          # 创建提交
+          git commit -m "Auto-sync: Update to ${{ env.WORKFLOW_NAME }} (ID: ${{ env.WORKFLOW_ID }})" \
+                     -m "Sync from GitHub workflow: ${{ env.WORKFLOW_NAME }}" \
+                     -m "Workflow ID: ${{ env.WORKFLOW_ID }}" \
+                     -m "Sync time: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          
+          # 推送到 Gitee（强制推送以确保同步）
+          git push gitee HEAD:master --force
+
+      - name: 在 Gitee 创建发布
+        if: env.NEED_UPDATE == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workflowId = process.env.WORKFLOW_ID;
+            const workflowName = process.env.WORKFLOW_NAME;
+            const downloadUrl = `${process.env.DOWNLOAD_BASE_URL}/${workflowId}/BetterGI_7z.zip`;
+            
+            // 调用 Gitee API 创建发布
+            const releaseData = {
+              tag_name: `sync-${workflowId}`,
+              name: `Sync: ${workflowName}`,
+              body: `自动同步自 GitHub Workflow\n\n- **Workflow名称**: ${workflowName}\n- **Workflow ID**: ${workflowId}\n- **源下载地址**: ${downloadUrl}\n- **同步时间**: ${new Date().toISOString()}`,
+              prerelease: false,
+              target_commitish: 'master'
+            };
+            
+            console.log('创建Gitee发布:', releaseData);
+            
+            // 使用Gitee API创建发布
+            await fetch(`https://gitee.com/api/v5/repos/${process.env.GITEE_REPO}/releases`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `token ${process.env.GITEE_TOKEN}`
+              },
+              body: JSON.stringify(releaseData)
+            }).then(response => {
+              if (!response.ok) {
+                throw new Error(`Gitee API error: ${response.status}`);
+              }
+              return response.json();
+            }).then(data => {
+              console.log('Release created:', data.html_url);
+            }).catch(error => {
+              console.error('Failed to create release:', error);
+              // 不中断整个工作流
+            });
