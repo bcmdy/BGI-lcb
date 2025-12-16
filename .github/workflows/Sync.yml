@@ -1,8 +1,8 @@
 name: Sync BetterGI Release to Gitee
 
 on:
-  # schedule:
-  #   - cron: '*/30 * * * *'
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -83,7 +83,7 @@ jobs:
           echo "📤 正在推送到 GitHub（只更新 ID 文件）..."
           git push origin HEAD:${{ github.ref_name }}
 
-      - name: 推送到 Gitee（带实时进度解析）
+      - name: 推送到 Gitee（带估算进度显示）
         if: env.NEED_UPDATE == 'true'
         run: |
           # 如果工作树干净，先重置
@@ -96,50 +96,72 @@ jobs:
           git add .last-workflow-id BetterGI_7z.zip
           git commit --amend --no-edit
           
+          # 获取文件大小用于估算
+          TOTAL_SIZE=$(stat -c%s "BetterGI_7z.zip" 2>/dev/null || stat -f%z "BetterGI_7z.zip" 2>/dev/null || echo "0")
+          TOTAL_MB=$((TOTAL_SIZE / 1024 / 1024))
+          
           echo ""
           echo "📤 开始推送到 Gitee..."
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 待推送文件: BetterGI_7z.zip (${TOTAL_MB} MB)"
+          echo "⏱️  预计时间: ~$((TOTAL_MB / 50))-$((TOTAL_MB / 30)) 秒"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # 启动推送进程到后台，确保行缓冲
-          stdbuf -oL -eL git -c http.postBuffer=2097152000 push gitee HEAD:master --force --progress > /tmp/push_output.log 2>&1 &
+          # 后台运行真实推送
+          stdbuf -oL -eL git -c http.postBuffer=2097152000 push gitee HEAD:master --force --verbose > /tmp/push.log 2>&1 &
           PUSH_PID=$!
+          START_TIME=$(date +%s)
           
-          # 创建临时文件保存上次进度
-          touch /tmp/last_progress.txt
-          
-          # 持续监控进度
+          # 显示估算进度（每5秒更新一次）
           while kill -0 $PUSH_PID 2>/dev/null; do
-            if [ -f /tmp/push_output.log ]; then
-              # 提取最后一条包含进度信息的行
-              CURRENT_PROGRESS=$(grep -E "(Counting|Compressing objects|Writing objects|Total.*delta)" /tmp/push_output.log | tail -1)
-              
-              # 如果进度有更新，打印新进度
-              if [ "$CURRENT_PROGRESS" != "$(cat /tmp/last_progress.txt 2>/dev/null)" ] && [ -n "$CURRENT_PROGRESS" ]; then
-                echo "$CURRENT_PROGRESS | $(date +%H:%M:%S)"
-                echo "$CURRENT_PROGRESS" > /tmp/last_progress.txt
-              elif [ -z "$CURRENT_PROGRESS" ]; then
-                # 如果没有进度信息，显示等待提示
-                echo "⏳ 推送进行中... $(date +%H:%M:%S)"
-              fi
+            ELAPSED=$(( $(date +%s) - START_TIME ))
+            ELAPSED=$((ELAPSED + 1))  # 避免除零
+            
+            # 基于时间的估算进度 (假设平均速度 30-50 MB/s)
+            EST_SPEED=$(( 30 + RANDOM % 20 ))  # 30-49 MB/s 随机值
+            EST_UPLOADED=$((ELAPSED * EST_SPEED))
+            
+            if [ $EST_UPLOADED -gt $TOTAL_MB ]; then
+              EST_PERCENT=95  # 接近完成但不到100%
+            elif [ $TOTAL_MB -gt 0 ]; then
+              EST_PERCENT=$((EST_UPLOADED * 100 / TOTAL_MB))
+            else
+              EST_PERCENT=0
             fi
             
-            # 每3秒检查一次
-            sleep 3
+            # 显示进度条
+            BAR_LEN=30
+            FILLED_LEN=$((EST_PERCENT * BAR_LEN / 100))
+            EMPTY_LEN=$((BAR_LEN - FILLED_LEN))
+            
+            printf "\r  ⏳ 推送中 [%s%s] %3d%% | %d/%d MB | 已用 %ds" \
+              "$(printf '%*s' "$FILLED_LEN" '' | tr ' ' '▓')" \
+              "$(printf '%*s' "$EMPTY_LEN" '' | tr ' ' '░')" \
+              "$EST_PERCENT" \
+              "$((EST_UPLOADED < TOTAL_MB ? EST_UPLOADED : TOTAL_MB))" \
+              "$TOTAL_MB" \
+              "$ELAPSED"
+            
+            sleep 5
           done
           
           # 等待进程完成
           wait $PUSH_PID
           PUSH_EXIT_CODE=$?
           
-          echo ""
+          echo ""  # 结束进度条行
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📝 完整推送日志:"
-          cat /tmp/push_output.log
           
           if [ $PUSH_EXIT_CODE -eq 0 ]; then
             echo "✅ Gitee 推送成功完成！"
+            echo ""
+            echo "📊 推送统计:"
+            grep -E "(Total|delta|reused|pack-reused)" /tmp/push.log | head -5 || echo "  (详细统计获取失败)"
           else
             echo "❌ Gitee 推送失败，退出码: $PUSH_EXIT_CODE"
+            echo ""
+            echo "📝 错误详情:"
+            tail -20 /tmp/push.log
             exit $PUSH_EXIT_CODE
           fi
 
