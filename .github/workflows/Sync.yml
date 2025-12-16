@@ -1,8 +1,8 @@
 name: Sync BetterGI Release to Gitee
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
+  # schedule:
+  #   - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -83,7 +83,7 @@ jobs:
           echo "📤 正在推送到 GitHub（只更新 ID 文件）..."
           git push origin HEAD:${{ github.ref_name }}
 
-      - name: 推送到 Gitee（带进度监控）
+      - name: 推送到 Gitee（带实时进度解析）
         if: env.NEED_UPDATE == 'true'
         run: |
           # 如果工作树干净，先重置
@@ -100,42 +100,48 @@ jobs:
           echo "📤 开始推送到 Gitee..."
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # 使用后台进程运行 git push，并定期打印进度
-          {
-            # 启动 git push 到后台
-            git -c http.postBuffer=2097152000 push gitee HEAD:master --force --progress 2>&1 > /tmp/push_output.log &
-            PUSH_PID=$!
-            
-            # 定期打印进度
-            while kill -0 $PUSH_PID 2>/dev/null; do
-              if [ -f /tmp/push_output.log ]; then
+          # 启动推送进程到后台，确保行缓冲
+          stdbuf -oL -eL git -c http.postBuffer=2097152000 push gitee HEAD:master --force --progress > /tmp/push_output.log 2>&1 &
+          PUSH_PID=$!
+          
+          # 创建临时文件保存上次进度
+          touch /tmp/last_progress.txt
+          
+          # 持续监控进度
+          while kill -0 $PUSH_PID 2>/dev/null; do
+            if [ -f /tmp/push_output.log ]; then
+              # 提取最后一条包含进度信息的行
+              CURRENT_PROGRESS=$(grep -E "(Counting|Compressing objects|Writing objects|Total.*delta)" /tmp/push_output.log | tail -1)
+              
+              # 如果进度有更新，打印新进度
+              if [ "$CURRENT_PROGRESS" != "$(cat /tmp/last_progress.txt 2>/dev/null)" ] && [ -n "$CURRENT_PROGRESS" ]; then
+                echo "$CURRENT_PROGRESS | $(date +%H:%M:%S)"
+                echo "$CURRENT_PROGRESS" > /tmp/last_progress.txt
+              elif [ -z "$CURRENT_PROGRESS" ]; then
+                # 如果没有进度信息，显示等待提示
                 echo "⏳ 推送进行中... $(date +%H:%M:%S)"
-                tail -5 /tmp/push_output.log 2>/dev/null || true
               fi
-              sleep 10  # 每10秒显示一次
-            done
-            
-            # 等待进程完成
-            wait $PUSH_PID
-            PUSH_EXIT_CODE=$?
-            
-            # 显示完整输出
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📝 完整推送日志:"
-            cat /tmp/push_output.log
-            
-            if [ $PUSH_EXIT_CODE -eq 0 ]; then
-              echo "✅ Gitee 推送成功完成！"
-            else
-              echo "❌ Gitee 推送失败，退出码: $PUSH_EXIT_CODE"
-              exit $PUSH_EXIT_CODE
             fi
-          } || {
-            # 如果上面的方法失败，回退到简单方法
-            echo "⚠️ 后台监控失败，回退到普通推送..."
-            git -c http.postBuffer=2097152000 push gitee HEAD:master --force --progress
-          }
+            
+            # 每3秒检查一次
+            sleep 3
+          done
+          
+          # 等待进程完成
+          wait $PUSH_PID
+          PUSH_EXIT_CODE=$?
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📝 完整推送日志:"
+          cat /tmp/push_output.log
+          
+          if [ $PUSH_EXIT_CODE -eq 0 ]; then
+            echo "✅ Gitee 推送成功完成！"
+          else
+            echo "❌ Gitee 推送失败，退出码: $PUSH_EXIT_CODE"
+            exit $PUSH_EXIT_CODE
+          fi
 
       - name: 在 Gitee 创建发布
         if: env.NEED_UPDATE == 'true'
