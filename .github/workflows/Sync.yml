@@ -129,14 +129,21 @@ jobs:
               EST_PERCENT=0
             fi
             
-            # 显示进度条
+            # 限制百分比最大为95
+            if [ $EST_PERCENT -gt 95 ]; then
+              EST_PERCENT=95
+            fi
+            
+            # 生成进度条（使用ASCII字符 = 和 -）
             BAR_LEN=30
             FILLED_LEN=$((EST_PERCENT * BAR_LEN / 100))
             EMPTY_LEN=$((BAR_LEN - FILLED_LEN))
             
-            printf "\r  ⏳ 推送中 [%s%s] %3d%% | %d/%d MB | 已用 %ds" \
-              "$(printf '%*s' "$FILLED_LEN" '' | tr ' ' '▓')" \
-              "$(printf '%*s' "$EMPTY_LEN" '' | tr ' ' '░')" \
+            # 使用纯ASCII字符显示进度条
+            printf "\r  ⏳ 推送中 ["
+            printf "%0.s=" $(seq 1 $FILLED_LEN)
+            printf "%0.s-" $(seq 1 $EMPTY_LEN)
+            printf "] %3d%% | %d/%d MB | 已用 %ds" \
               "$EST_PERCENT" \
               "$((EST_UPLOADED < TOTAL_MB ? EST_UPLOADED : TOTAL_MB))" \
               "$TOTAL_MB" \
